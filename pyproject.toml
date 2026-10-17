@@ -1,0 +1,18 @@
+[project]
+name = "graphrag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "langchain-neo4j>=0.11.0",
+    "langchain-openai>=1.7.1",
+    "neo4j>=6.4.0",
+    "pymupdf>=1.28.2",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+]
