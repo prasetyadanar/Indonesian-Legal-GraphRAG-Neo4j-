@@ -59,6 +59,98 @@ def _flush_paragraph(buf: list[str]) -> str:
     return txt.strip()
 
 
+RE_HEADER_DOK = re.compile(r"NOMOR\s+\d+\s+TAHUN\s+\d{4}", re.I)
+
+
+def _share_font(doc, n_hal: int = 3) -> dict[str, float]:
+    """Proporsi jumlah karakter per font di halaman-halaman awal."""
+    hitung: dict[str, int] = {}
+    for i in range(min(n_hal, doc.page_count)):
+        for b in doc[i].get_text("dict")["blocks"]:
+            if b["type"] != 0:
+                continue
+            for l in b["lines"]:
+                for s in l["spans"]:
+                    if s["text"].strip():
+                        hitung[s["font"]] = hitung.get(s["font"], 0) + len(s["text"])
+    total = sum(hitung.values()) or 1
+    return {f: n / total for f, n in hitung.items()}
+
+
+def _teks_lapisan(doc, font: str, tol: float = 3.0) -> list[str]:
+    """Teks tiap halaman dari satu font saja, span digabung jadi baris.
+
+    OCR berlapis meletakkan tiap kata pada span sendiri, jadi span dikelompokkan
+    lewat koordinat y (toleransi `tol`) lalu diurutkan berdasarkan x.
+    """
+    halaman: list[str] = []
+    for pg in doc:
+        spans = []
+        for b in pg.get_text("dict")["blocks"]:
+            if b["type"] != 0:
+                continue
+            for l in b["lines"]:
+                for s in l["spans"]:
+                    if s["font"] == font and s["text"].strip():
+                        spans.append((s["bbox"][1], s["bbox"][0], s["text"]))
+        spans.sort()
+        baris: list[str] = []
+        buf: list[tuple[float, str]] = []
+        cur_y = 0.0
+        for y, x, t in spans:
+            if buf and abs(y - cur_y) > tol:
+                baris.append(" ".join(t2 for _, t2 in sorted(buf)))
+                buf = []
+            buf.append((x, t))
+            cur_y = y
+        if buf:
+            baris.append(" ".join(t2 for _, t2 in sorted(buf)))
+        halaman.append("\n".join(b for b in (_bersih_baris(l) for l in baris) if b))
+    return halaman
+
+
+# Artefak OCR pada header pasal: '| Pasal 1', 'Pasal li' (11), 'Pasal S1' (51).
+RE_HDR_SAMPAH = re.compile(r"^[|Il]{1,2}\s+(?=Pasal)")
+RE_HDR_ANGKA = re.compile(r"^(Pasal\s*)([lI1i][lI1i]?|[S5][lI1i]?)$")
+
+
+def _bersih_baris(line: str) -> str:
+    """Perbaiki artefak OCR yang menghalangi deteksi header pasal.
+
+    Hanya menyentuh baris yang *seluruhnya* header pasal — teks isi yang
+    mengandung 'Pasal N ayat' tak tersentuh, karena polanya menuntut baris
+    pendek yang persis 'Pasal <angka-rusak>'.
+    """
+    line = " ".join(line.split())
+    line = RE_HDR_SAMPAH.sub("", line)
+    m = RE_HDR_ANGKA.fullmatch(line)
+    if m:
+        digit = (m.group(2)
+                 .replace("l", "1").replace("I", "1").replace("i", "1")
+                 .replace("S", "5").replace("s", "5"))
+        return f"{m.group(1).strip()} {digit}"
+    return line
+
+
+def _halaman_teks(doc) -> list[str]:
+    """Teks per halaman; PDF berlapis OCR ganda diambil satu lapisan saja.
+
+    Scan yang di-OCR lalu di-OCR ulang punya dua set teks bertumpuk di posisi
+    sama (mis. Helvetica + GlyphLessFont). get_text() menggabungkan keduanya
+    sehingga tiap baris muncul dobel dan pasal_id jadi duplikat. Deteksi: ada
+    >1 font yang masing-masing menutup >=15% karakter — dokumen normal cuma
+    punya satu font isi.
+    """
+    share = _share_font(doc)
+    dominan = [f for f, rasio in share.items() if rasio >= 0.15]
+    if len(dominan) < 2:
+        return [p.get_text() for p in doc]
+    # pilih lapisan yang headernya paling utuh ("NOMOR N TAHUN YYYY")
+    kandidat = {f: "\n".join(_teks_lapisan(doc, f)) for f in dominan}
+    font = max(dominan, key=lambda f: len(RE_HEADER_DOK.findall(kandidat[f])))
+    return _teks_lapisan(doc, font)
+
+
 def _clean_lines(pages: list[str]) -> list[str]:
     """Buang header/footer halaman berulang, rapikan whitespace."""
     out: list[str] = []
@@ -407,7 +499,7 @@ def _extract_preamble(lines: list[str]) -> dict:
 def parse_uu(path: str) -> dict:
     doc = pymupdf.open(path)
     try:
-        pages = [p.get_text() for p in doc]
+        pages = _halaman_teks(doc)
     finally:
         doc.close()
 

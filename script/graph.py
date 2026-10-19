@@ -14,6 +14,7 @@ Skema graph:
   (Pasal)-[:MERUJUK_UU]->(UU)                     # rujukan dokumen lain
   (UU)-[:PUNYA_PREAMBLE]->(Preamble)
   (Preamble)-[:HAS_LEGAL_BASIS]->(UU)
+  (UU)-[:MELAKSANAKAN]->(UU)                      # PP pelaksana -> UU induknya
 
 Khusus jalur perubahan (UU omnibus):
   (Pasal)-[:MENGUBAH   {aksi, uu_target}]->(Pasal target)
@@ -191,19 +192,39 @@ def _upsert_preamble(driver, pre_rows: list[dict], database="neo4j"):
     return len(rows)
 
 
+def _upsert_pelaksana(driver, uu_id: str, target: str, database="neo4j"):
+    """Edge peraturan pelaksana: (PP 35/2021)-[:MELAKSANAKAN]->(UU 2/2022).
+
+    target diisi manual — teks PP merujuk UU 11/2020 yang sudah dicabut Perppu
+    2/2022, jadi rujukan tekstual tak menunjuk dokumen yang berlaku.
+    """
+    if not target:
+        return 0
+    _run(driver, """
+    MATCH (p:UU {uu_id: $uu_id})
+    MERGE (t:UU {uu_id: $target})
+    MERGE (p)-[:MELAKSANAKAN]->(t)
+    """, database, uu_id=uu_id, target=target)
+    return 1
+
+
 def insert_uu_murni(driver, data: dict, database: str = "neo4j",
-                    judul: str = "") -> dict:
+                    judul: str = "", jenis: str = "murni",
+                    melaksanakan: str = "") -> dict:
     """Insert satu UU murni (parse_uu.parse_uu).
 
     judul: override opsional; kalau kosong pakai meta['judul'] dari parser.
+    jenis: "murni" (UU) atau "pp" (peraturan pelaksana).
+    melaksanakan: uu_id dokumen yang dilaksanakan, mis. "2/2022" utk PP 35/2021.
     """
     meta, pasal = data["meta"], data["pasal"]
     judul = judul or meta.get("judul", "") or ""
     _constraints(driver, database)
-    _upsert_uu(driver, meta["uu_id"], meta["nomor"], meta["tahun"], judul, "murni", database)
+    _upsert_uu(driver, meta["uu_id"], meta["nomor"], meta["tahun"], judul, jenis, database)
     n_pasal = _upsert_pasal(driver, pasal, database)
     n_bab = _upsert_struktur(driver, pasal, database)
     n_ref, n_refuu = _upsert_refs(driver, pasal, database)
+    n_pelaksana = _upsert_pelaksana(driver, meta["uu_id"], melaksanakan, database)
     pr = data.get("preamble") or {}
     n_pre = _upsert_preamble(driver, [{
         "preamble_id": f"{meta['uu_id']}:preamble", "uu_id": meta["uu_id"],
@@ -211,7 +232,8 @@ def insert_uu_murni(driver, data: dict, database: str = "neo4j",
         "memutuskan": pr.get("memutuskan", ""),
     }] if pr else [], database)
     return {"uu": meta["uu_id"], "pasal": n_pasal, "bab": n_bab,
-            "merujuk": n_ref, "merujuk_uu": n_refuu, "preamble": n_pre}
+            "merujuk": n_ref, "merujuk_uu": n_refuu, "pelaksana": n_pelaksana,
+            "preamble": n_pre}
 
 
 def insert_uu_perubahan(driver, data: dict, database: str = "neo4j") -> dict:
